@@ -20,8 +20,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Array;
-import java.lang.reflect.Method;
-import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.security.KeyManagementException;
@@ -33,7 +31,6 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.zip.GZIPInputStream;
 
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
@@ -43,7 +40,10 @@ import org.apache.http.Header;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpResponse;
+import org.apache.http.HttpStatus;
+import org.apache.http.auth.AuthScheme;
 import org.apache.http.auth.AuthScope;
+import org.apache.http.auth.Credentials;
 import org.apache.http.auth.UsernamePasswordCredentials;
 import org.apache.http.client.AuthCache;
 import org.apache.http.client.ClientProtocolException;
@@ -59,17 +59,18 @@ import org.apache.http.conn.HttpClientConnectionManager;
 import org.apache.http.conn.socket.ConnectionSocketFactory;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.impl.auth.BasicScheme;
+import org.apache.http.impl.auth.DigestScheme;
 import org.apache.http.impl.client.BasicAuthCache;
 import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.conn.BasicHttpClientConnectionManager;
 import org.gradle.api.Project;
-import org.gradle.logging.ProgressLogger;
-import org.gradle.logging.ProgressLoggerFactory;
 
+import de.undercouch.gradle.tasks.download.internal.ContentEncodingNoneInterceptor;
 import de.undercouch.gradle.tasks.download.internal.InsecureHostnameVerifier;
 import de.undercouch.gradle.tasks.download.internal.InsecureTrustManager;
+import de.undercouch.gradle.tasks.download.internal.ProgressLoggerWrapper;
 import groovy.lang.Closure;
 
 /**
@@ -89,10 +90,12 @@ public class DownloadAction implements DownloadSpec {
     private boolean compress = true;
     private String username;
     private String password;
+    private AuthScheme authScheme;
+    private Credentials credentials;
     private Map<String, String> headers;
     private boolean acceptAnyCertificate = false;
 
-    private ProgressLogger progressLogger;
+    private ProgressLoggerWrapper progressLogger;
     private String size;
     private long processedBytes = 0;
     private long loggedKb = 0;
@@ -121,7 +124,7 @@ public class DownloadAction implements DownloadSpec {
         if (dest == null) {
             throw new IllegalArgumentException("Please provide a download destination");
         }
-        
+
         if (dest.equals(project.getBuildDir())) {
             //make sure build dir exists
             dest.mkdirs();
@@ -141,25 +144,9 @@ public class DownloadAction implements DownloadSpec {
             execute(src);
         }
     }
-    
+
     private void execute(URL src) throws IOException {
-        File destFile = dest;
-        if (destFile.isDirectory()) {
-            //guess name from URL
-            String name = src.toString();
-            if (name.endsWith("/")) {
-                name = name.substring(0, name.length() - 1);
-            }
-            name = name.substring(name.lastIndexOf('/') + 1);
-            destFile = new File(dest, name);
-        } else {
-            //create destination directory
-            File parent = destFile.getParentFile();
-            if (parent != null) {
-                parent.mkdirs();
-            }
-        }
-        
+        final File destFile = makeDestFile(src);
         if (!overwrite && destFile.exists()) {
             if (!quiet) {
                 project.getLogger().info("Destination file already exists. "
@@ -183,35 +170,13 @@ public class DownloadAction implements DownloadSpec {
             throw new IllegalStateException("Unable to download " + src +
                     " in offline mode.");
         }
-        
-        long timestamp = 0;
-        if (onlyIfNewer && destFile.exists()) {
-            timestamp = destFile.lastModified();
-        }
+
+        final long timestamp = onlyIfNewer && destFile.exists() ? destFile.lastModified() : 0;
         
         //create progress logger
         if (!quiet) {
-            //we are about to access an internal class. Use reflection here to provide
-            //as much compatibility to different Gradle versions as possible
             try {
-                Method getServices = project.getClass().getMethod("getServices");
-                Object serviceFactory = getServices.invoke(project);
-                Method get = serviceFactory.getClass().getMethod("get", Class.class);
-                Object progressLoggerFactory = get.invoke(serviceFactory,
-                        ProgressLoggerFactory.class);
-                Method newOperation = progressLoggerFactory.getClass().getMethod(
-                        "newOperation", Class.class);
-                progressLogger = (ProgressLogger)newOperation.invoke(
-                        progressLoggerFactory, getClass());
-                String desc = "Download " + src.toString();
-                Method setDescription = progressLogger.getClass().getMethod(
-                        "setDescription", String.class);
-                setDescription.setAccessible(true);
-                setDescription.invoke(progressLogger, desc);
-                Method setLoggingHeader = progressLogger.getClass().getMethod(
-                        "setLoggingHeader", String.class);
-                setLoggingHeader.setAccessible(true);
-                setLoggingHeader.invoke(progressLogger, desc);
+                progressLogger = new ProgressLoggerWrapper(project, src.toString());
             } catch (Exception e) {
                 //unable to get progress logger
                 project.getLogger().error("Unable to get progress logger. Download "
@@ -229,14 +194,10 @@ public class DownloadAction implements DownloadSpec {
             //open URL connection
             CloseableHttpResponse response = openConnection(httpHost, src.getFile(),
                     timestamp, client);
-            if (response == null) {
-                return;
-            }
-            
             //check if file on server was modified
             long lastModified = parseLastModified(response);
             int code = response.getStatusLine().getStatusCode();
-            if (code == HttpURLConnection.HTTP_NOT_MODIFIED ||
+            if (code == HttpStatus.SC_NOT_MODIFIED ||
                     (lastModified != 0 && timestamp >= lastModified)) {
                 if (!quiet) {
                     project.getLogger().info("Not modified. Skipping '" + src + "'");
@@ -280,9 +241,6 @@ public class DownloadAction implements DownloadSpec {
         
         //open stream and start downloading
         InputStream is = entity.getContent();
-        if (isContentCompressed(entity)) {
-            is = new GZIPInputStream(is);
-        }
         try {
             startProgress();
             OutputStream os = new FileOutputStream(destFile);
@@ -314,6 +272,36 @@ public class DownloadAction implements DownloadSpec {
         if (onlyIfNewer && newTimestamp > 0) {
             destFile.setLastModified(newTimestamp);
         }
+    }
+
+    /**
+     * Generates the path to an output file for a given source URL. Creates
+     * all necessary parent directories for the destination file.
+     * @param src the source
+     * @return the path to the output file
+     */
+    private File makeDestFile(URL src) {
+        if (dest == null) {
+            throw new IllegalArgumentException("Please provide a download destination");
+        }
+
+        File destFile = dest;
+        if (destFile.isDirectory()) {
+            //guess name from URL
+            String name = src.toString();
+            if (name.endsWith("/")) {
+                name = name.substring(0, name.length() - 1);
+            }
+            name = name.substring(name.lastIndexOf('/') + 1);
+            destFile = new File(dest, name);
+        } else {
+            //create destination directory
+            File parent = destFile.getParentFile();
+            if (parent != null) {
+                parent.mkdirs();
+            }
+        }
+        return destFile;
     }
     
     /**
@@ -371,6 +359,10 @@ public class DownloadAction implements DownloadSpec {
             builder.setConnectionManager(cm);
         }
         
+        //add an interceptor that replaces the invalid Content-Type
+        //'none' by 'identity'
+        builder.addInterceptorFirst(new ContentEncodingNoneInterceptor());
+
         CloseableHttpClient client = builder.build();
         return client;
     }
@@ -381,18 +373,33 @@ public class DownloadAction implements DownloadSpec {
      * greater than 0.
      * @param httpHost the HTTP host to connect to
      * @param file the file to request
-     * @param timestamp the timestamp of the destination file
+     * @param timestamp the timestamp of the destination file, in milliseconds
      * @param client the HTTP client to use to perform the request
-     * @return the URLConnection or null if the download should be skipped
+     * @return the URLConnection
      * @throws IOException if the connection could not be opened
      */
     private CloseableHttpResponse openConnection(HttpHost httpHost, String file,
             long timestamp, CloseableHttpClient client) throws IOException {
         //perform preemptive authentication
         HttpClientContext context = null;
-        if (username != null && password != null) {
+        if ((username != null && password != null) || credentials != null) {
             context = HttpClientContext.create();
-            addAuthentication(httpHost, username, password, true, context);
+            AuthScheme as = authScheme;
+            if (as == null) {
+                as = new BasicScheme();
+            }
+            Credentials c;
+            if (username != null && password != null) {
+                if (!(as instanceof BasicScheme) && !(as instanceof DigestScheme)) {
+                    throw new IllegalArgumentException("If 'username' and "
+                            + "'password' are set 'authScheme' must be either "
+                            + "'Basic' or 'Digest'.");
+                }
+                c = new UsernamePasswordCredentials(username, password);
+            } else {
+                c = credentials;
+            }
+            addAuthentication(httpHost, c, as, context);
         }
         
         //create request
@@ -414,13 +421,15 @@ public class DownloadAction implements DownloadSpec {
                 if (context == null) {
                     context = HttpClientContext.create();
                 }
-                addAuthentication(proxy, proxyUser, proxyPassword, false, context);
+                Credentials credentials =
+                        new UsernamePasswordCredentials(proxyUser, proxyPassword);
+                addAuthentication(proxy, credentials, null, context);
             }
         }
         
         //set If-Modified-Since header
         if (timestamp > 0) {
-            get.setHeader("If-Modified-Since", String.valueOf(timestamp));
+            get.setHeader("If-Modified-Since", DateUtils.formatDate(new Date(timestamp)));
         }
         
         //set headers
@@ -440,7 +449,7 @@ public class DownloadAction implements DownloadSpec {
         
         //handle response
         int code = response.getStatusLine().getStatusCode();
-        if (code < 200 || code > 299) {
+        if ((code < 200 || code > 299) && code != HttpStatus.SC_NOT_MODIFIED) {
             throw new ClientProtocolException(response.getStatusLine().getReasonPhrase());
         }
         
@@ -450,16 +459,14 @@ public class DownloadAction implements DownloadSpec {
     /**
      * Add authentication information for the given host
      * @param host the host
-     * @param username the username
-     * @param password the password
-     * @param preAuthenticate <code>true</code> if the authentication scheme
-     * should be set to <code>Basic</code> preemptively (should be
-     * <code>false</code> if adding authentication for a proxy server)
+     * @param credentials the credentials
+     * @param authScheme the scheme for preemptive authentication (should be
+     * <code>null</code> if adding authentication for a proxy server)
      * @param context the context in which the authentication information
      * should be saved
      */
-    private void addAuthentication(HttpHost host, String username,
-            String password, boolean preAuthenticate, HttpClientContext context) {
+    private void addAuthentication(HttpHost host, Credentials credentials,
+            AuthScheme authScheme, HttpClientContext context) {
         AuthCache authCache = context.getAuthCache();
         if (authCache == null) {
             authCache = new BasicAuthCache();
@@ -472,11 +479,10 @@ public class DownloadAction implements DownloadSpec {
             context.setCredentialsProvider(credsProvider);
         }
         
-        credsProvider.setCredentials(new AuthScope(host),
-                new UsernamePasswordCredentials(username, password));
+        credsProvider.setCredentials(new AuthScope(host), credentials);
         
-        if (preAuthenticate) {
-            authCache.put(host, new BasicScheme());
+        if (authScheme != null) {
+            authCache.put(host, authScheme);
         }
     }
     
@@ -518,23 +524,6 @@ public class DownloadAction implements DownloadSpec {
         return date.getTime();
     }
     
-    /**
-     * Checks if the content of the given {@link HttpEntity} is compressed
-     * @param entity the entity to check
-     * @return true if it is compressed, false otherwise
-     */
-    private boolean isContentCompressed(HttpEntity entity) {
-        Header header = entity.getContentEncoding();
-        if (header == null) {
-            return false;
-        }
-        String value = header.getValue();
-        if (value == null || value.isEmpty()) {
-            return false;
-        }
-        return value.equalsIgnoreCase("gzip");
-    }
-    
     private void startProgress() {
         if (progressLogger != null) {
             progressLogger.started();
@@ -567,15 +556,26 @@ public class DownloadAction implements DownloadSpec {
     /**
      * @return true if the download destination is up to date
      */
-    boolean isUpToDate() {
+    public boolean isUpToDate() {
         return upToDate == sources.size();
     }
     
     /**
      * @return true if execution of this task has been skipped
      */
-    boolean isSkipped() {
+    public boolean isSkipped() {
         return skipped == sources.size();
+    }
+
+    /**
+     * @return a list of files created by this action (i.e. the destination files)
+     */
+    public List<File> getOutputFiles() {
+        List<File> files = new ArrayList<File>(sources.size());
+        for (URL src : sources) {
+            files.add(makeDestFile(src));
+        }
+        return files;
     }
     
     @Override
@@ -656,6 +656,32 @@ public class DownloadAction implements DownloadSpec {
     }
 
     @Override
+    public void authScheme(Object authScheme) {
+        if (authScheme instanceof AuthScheme) {
+            this.authScheme = (AuthScheme)authScheme;
+        } else if (authScheme instanceof String) {
+            String sa = (String)authScheme;
+            if (sa.equalsIgnoreCase("Basic")) {
+                this.authScheme = new BasicScheme();
+            } else if (sa.equalsIgnoreCase("Digest")) {
+                this.authScheme = new DigestScheme();
+            } else {
+                throw new IllegalArgumentException("Invalid authentication scheme: "
+                        + "'" + sa + "'. Valid values are 'Basic' and 'Digest'.");
+            }
+        } else {
+            throw new IllegalArgumentException("Invalid authentication "
+                    + "scheme. Provide either a String or an instance of "
+                    + AuthScheme.class.getName() + ".");
+        }
+    }
+
+    @Override
+    public void credentials(Credentials credentials) {
+        this.credentials = credentials;
+    }
+
+    @Override
     public void headers(Map<String, String> headers) {
         if (this.headers == null) {
             this.headers = new LinkedHashMap<String, String>();
@@ -721,6 +747,21 @@ public class DownloadAction implements DownloadSpec {
     @Override
     public String getPassword() {
         return password;
+    }
+
+    @Override
+    public AuthScheme getAuthScheme() {
+        return authScheme;
+    }
+    
+    @Override
+    public Credentials getCredentials() {
+        if (credentials != null) {
+            return credentials;
+        } else if (username != null && password != null) {
+            return new UsernamePasswordCredentials(username, password);
+        }
+        return null;
     }
 
     @Override

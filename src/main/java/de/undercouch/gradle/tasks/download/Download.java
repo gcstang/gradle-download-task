@@ -18,9 +18,15 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.MalformedURLException;
+import java.util.List;
 import java.util.Map;
 
+import org.apache.http.auth.AuthScheme;
+import org.apache.http.auth.Credentials;
 import org.gradle.api.DefaultTask;
+import org.gradle.api.Task;
+import org.gradle.api.specs.Spec;
+import org.gradle.api.tasks.OutputFiles;
 import org.gradle.api.tasks.TaskAction;
 
 /**
@@ -41,6 +47,12 @@ public class Download extends DefaultTask implements DownloadSpec {
      */
     public Download() {
         action = new DownloadAction(getProject());
+        getOutputs().upToDateWhen(new Spec<Task>() {
+            @Override
+            public boolean isSatisfiedBy(Task task) {
+                return !(isOnlyIfNewer() || isOverwrite());
+            }
+        });
     }
     
     /**
@@ -58,7 +70,7 @@ public class Download extends DefaultTask implements DownloadSpec {
                 //as much compatibility to previous Gradle versions as possible (see issue #16)
                 Method getState = this.getClass().getMethod("getState");
                 Object state = getState.invoke(this);
-                Method skipped = state.getClass().getMethod("skipped");
+                Method skipped = state.getClass().getMethod("skipped", String.class);
                 if (skipped != null) {
                     skipped.invoke(state, "Download skipped");
                 }
@@ -73,6 +85,14 @@ public class Download extends DefaultTask implements DownloadSpec {
         } catch (Exception e) {
             //just ignore
         }
+    }
+
+    /**
+     * @return a list of files created by this task (i.e. the destination files)
+     */
+    @OutputFiles
+    public List<File> getOutputFiles() {
+        return action.getOutputFiles();
     }
     
     @Override
@@ -113,6 +133,16 @@ public class Download extends DefaultTask implements DownloadSpec {
     @Override
     public void password(String password) {
         action.password(password);
+    }
+    
+    @Override
+    public void authScheme(Object authScheme) {
+        action.authScheme(authScheme);
+    }
+
+    @Override
+    public void credentials(Credentials credentials) {
+        action.credentials(credentials);
     }
 
     @Override
@@ -168,6 +198,16 @@ public class Download extends DefaultTask implements DownloadSpec {
     @Override
     public String getPassword() {
         return action.getPassword();
+    }
+    
+    @Override
+    public AuthScheme getAuthScheme() {
+        return action.getAuthScheme();
+    }
+
+    @Override
+    public Credentials getCredentials() {
+        return action.getCredentials();
     }
 
     @Override

@@ -1,11 +1,11 @@
-Gradle Download Task [![Circle CI](https://circleci.com/gh/michel-kraemer/gradle-download-task.svg?style=svg)](https://circleci.com/gh/michel-kraemer/gradle-download-task)
+Gradle Download Task [![CircleCI](https://img.shields.io/circleci/project/michel-kraemer/gradle-download-task.svg?maxAge=2592000)](https://circleci.com/gh/michel-kraemer/gradle-download-task) [![codecov](https://codecov.io/gh/michel-kraemer/gradle-download-task/branch/master/graph/badge.svg)](https://codecov.io/gh/michel-kraemer/gradle-download-task) [![Apache License, Version 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0)
 ====================
 
 This is a simple download task for [Gradle](http://www.gradle.org/).
 It displays progress information just as Gradle does when it retrieves
 an artifact from a repository.
 
-The plugin has been sucessfully tested with Gradle 1.0 up to 2.13.
+The plugin has been sucessfully tested with Gradle 1.0 up to 2.14.
 It should work with newer versions as well.
 
 <img width="686" src="https://raw.githubusercontent.com/michel-kraemer/gradle-download-task/6714ce9acecf735404960317bec7ecc31a2bbafa/gradle-download-task.gif">
@@ -17,7 +17,7 @@ Apply plugin configuration
 
 ```groovy
 plugins {
-    id "de.undercouch.download" version "3.0.0"
+    id "de.undercouch.download" version "3.1.1"
 }
 ```
 
@@ -29,7 +29,7 @@ buildscript {
         jcenter()
     }
     dependencies {
-        classpath 'de.undercouch:gradle-download-task:3.0.0'
+        classpath 'de.undercouch:gradle-download-task:3.1.1'
     }
 }
 
@@ -118,7 +118,9 @@ Please have a look at the `examples` directory for more code samples.
 Download task
 -------------
 
-The download task and the extension support the following properties
+The download task and the extension support the following properties.
+
+### General
 
 <dl>
 <dt>src</dt>
@@ -139,10 +141,6 @@ has been modified on the server since the last download <em>(default:
 <dt>compress</dt>
 <dd><code>true</code> if compression should be used during download <em>(default:
 <code>true</code>)</em></dd>
-<dt>username</dt>
-<dd>The username for <code>Basic</code> authentication <em>(optional)</em></dd>
-<dt>password</dt>
-<dd>The password for <code>Basic</code> authentication <em>(optional)</em></dd>
 <dt>header</dt>
 <dd>The name and value of a request header to set when making the download
 request <em>(optional)</em></dd>
@@ -157,6 +155,30 @@ and any certificate (even an invalid one) should be accepted.
 
 <em>Tip!</em> You may provide Groovy Closures to the `src` and `dest`
 properties to calculate their value at runtime.
+
+### Authentication
+
+<dl>
+<dt>username</dt>
+<dd>The username for <code>Basic</code> or <code>Digest</code> authentication
+<em>(optional)</em></dd>
+<dt>password</dt>
+<dd>The password for <code>Basic</code> or <code>Digest</code> authentication
+<em>(optional)</em></dd>
+<dt>credentials</dt>
+<dd>The credentials to use for authentication. This property is an alternative to
+<code>username</code> and <code>password</code>. The value is expected to be an instance of
+<a href="https://hc.apache.org/httpcomponents-client-4.5.x/httpclient/apidocs/org/apache/http/auth/Credentials.html">Credentials</a>.
+<em>(optional)</em></dd>
+<dt>authScheme</dt>
+<dd>The authentication scheme to use. Either a string (valid values are
+<code>Basic</code> and <code>Digest</code>) or an instance of
+<a href="https://hc.apache.org/httpcomponents-client-4.5.x/httpclient/apidocs/org/apache/http/auth/AuthScheme.html">AuthScheme</a>.
+If credentials are configured (either through <code>username</code> and
+<code>password</code> or through <code>credentials</code>) the default value of
+this property will be <code>Basic</code>. Otherwise this property has no default
+value. <em>(optional)</em></dd>
+</dl>
 
 Verify task
 -----------
